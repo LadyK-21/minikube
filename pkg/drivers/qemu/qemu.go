@@ -42,12 +42,14 @@ import (
 
 	"k8s.io/klog/v2"
 	pkgdrivers "k8s.io/minikube/pkg/drivers"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/firewall"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/network"
+	"k8s.io/minikube/pkg/util/retry"
 )
 
 const (
@@ -196,8 +198,14 @@ func (d *Driver) GetState() (state.State, error) {
 			return state.Stopped, nil
 		}
 	}
-	ret, err := d.RunQMPCommand("query-status")
-	if err != nil {
+	var ret map[string]interface{}
+	queryStatus := func() (err error) {
+		ret, err = d.RunQMPCommand("query-status")
+		return err
+	}
+	// on arm64 Macs the monitor may refuse connection for a second after creating the cluster, resulting in addons
+	// not being enabled, a simple retry resolves this, see: https://github.com/kubernetes/minikube/issues/17396
+	if err := retry.Expo(queryStatus, 1*time.Second, 10*time.Second); err != nil {
 		return state.Error, err
 	}
 
@@ -319,8 +327,8 @@ func parsePortRange(rawPortRange string) (int, int, error) {
 	return minPort, maxPort, nil
 }
 
-func getRandomPortNumberInRange(min, max int) int {
-	return rand.Intn(max-min) + min
+func getRandomPortNumberInRange(minimum, maximum int) int {
+	return rand.Intn(maximum-minimum) + minimum
 }
 
 func getAvailableTCPPortFromRange(minPort, maxPort int) (int, error) {
@@ -405,14 +413,11 @@ func (d *Driver) Start() error {
 	}
 
 	// hardware acceleration is important, it increases performance by 10x
-	if runtime.GOOS == "darwin" {
-		// On macOS, enable the Hypervisor framework accelerator.
+	accel := hardwareAcceleration()
+	if accel != "" {
+		klog.Infof("Using %s for hardware acceleration", accel)
 		startCmd = append(startCmd,
-			"-accel", "hvf")
-	} else if _, err := os.Stat("/dev/kvm"); err == nil && runtime.GOOS == "linux" {
-		// On Linux, enable the Kernel Virtual Machine accelerator.
-		startCmd = append(startCmd,
-			"-accel", "kvm")
+			"-accel", accel)
 	}
 
 	startCmd = append(startCmd,
@@ -500,17 +505,14 @@ func (d *Driver) Start() error {
 	case "socket_vmnet":
 		var err error
 		getIP := func() error {
-			// QEMU requires MAC address with leading 0s
-			// But socket_vmnet writes the MAC address to the dhcp leases file with leading 0s stripped
-			mac := pkgdrivers.TrimMacAddress(d.MACAddress)
-			d.IPAddress, err = pkgdrivers.GetIPAddressByMACAddress(mac)
+			d.IPAddress, err = pkgdrivers.GetIPAddressByMACAddress(d.MACAddress)
 			if err != nil {
 				return errors.Wrap(err, "failed to get IP address")
 			}
 			return nil
 		}
 		// Implement a retry loop because IP address isn't added to dhcp leases file immediately
-		for i := 0; i < 30; i++ {
+		for i := 0; i < 60; i++ {
 			log.Debugf("Attempt %d", i)
 			err = getIP()
 			if err == nil {
@@ -537,6 +539,21 @@ func (d *Driver) Start() error {
 	log.Infof("Waiting for VM to start (ssh -p %d docker@%s)...", d.SSHPort, d.IPAddress)
 
 	return WaitForTCPWithDelay(fmt.Sprintf("%s:%d", d.IPAddress, d.SSHPort), time.Second)
+}
+
+func hardwareAcceleration() string {
+	if detect.IsAmd64M1Emulation() {
+		return "tcg"
+	}
+	if runtime.GOOS == "darwin" {
+		// On macOS, enable the Hypervisor framework accelerator.
+		return "hvf"
+	}
+	if _, err := os.Stat("/dev/kvm"); err == nil && runtime.GOOS == "linux" {
+		// On Linux, enable the Kernel Virtual Machine accelerator.
+		return "kvm"
+	}
+	return ""
 }
 
 func isBootpdError(err error) bool {

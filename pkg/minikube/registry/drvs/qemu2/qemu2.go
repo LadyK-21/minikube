@@ -25,12 +25,13 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	"github.com/docker/machine/libmachine/drivers"
 	"github.com/spf13/viper"
 	"k8s.io/minikube/pkg/drivers/qemu"
 
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/localpath"
@@ -75,6 +76,9 @@ func qemuFirmwarePath(customPath string) (string, error) {
 	}
 	if runtime.GOOS == "windows" {
 		return "C:\\Program Files\\qemu\\share\\edk2-x86_64-code.fd", nil
+	}
+	if detect.IsAmd64M1Emulation() {
+		return "/opt/homebrew/opt/qemu/share/qemu/edk2-x86_64-code.fd", nil
 	}
 	arch := runtime.GOARCH
 	// For macOS, find the correct brew installation path for qemu firmware
@@ -125,7 +129,9 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 	switch runtime.GOARCH {
 	case "amd64":
 		qemuMachine = "" // default
-		qemuCPU = ""     // default
+		// set cpu type to max to enable higher microarchitecture levels
+		// see https://lists.gnu.org/archive/html/qemu-devel/2022-08/msg04066.html for details
+		qemuCPU = "max"
 	case "arm64":
 		qemuMachine = "virt"
 		qemuCPU = "cortex-a72"

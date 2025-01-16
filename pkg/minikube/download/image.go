@@ -32,6 +32,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"github.com/hashicorp/go-getter"
 	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/detect"
@@ -39,6 +40,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/out"
 	"k8s.io/minikube/pkg/minikube/out/register"
+	"k8s.io/minikube/pkg/version"
 )
 
 var (
@@ -78,14 +80,44 @@ func ImageExistsInDaemon(img string) bool {
 	// Check if image exists locally
 	klog.Infof("Checking for %s in local docker daemon", img)
 	cmd := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}@{{.Digest}}")
-	if output, err := cmd.Output(); err == nil {
-		if strings.Contains(string(output), image.TrimDockerIO(img)) {
-			klog.Infof("Found %s in local docker daemon, skipping pull", img)
-			return true
-		}
+	output, err := cmd.Output()
+	if err != nil {
+		klog.Warningf("failed to list docker images: %v", err)
+		return false
 	}
-	// Else, pull it
-	return false
+	if !strings.Contains(string(output), image.TrimDockerIO(img)) {
+		return false
+	}
+	correctArch, err := isImageCorrectArch(img)
+	if err != nil {
+		klog.Warning(err)
+		return false
+	}
+	if !correctArch {
+		klog.Warningf("image %s is of wrong architecture", img)
+		return false
+	}
+	klog.Infof("Found %s in local docker daemon, skipping pull", img)
+	return true
+}
+
+// isImageCorrectArch returns true if the image arch is the same as the binary
+// arch. This is needed to resolve
+// https://github.com/kubernetes/minikube/pull/19205
+func isImageCorrectArch(img string) (bool, error) {
+	ref, err := name.ParseReference(img)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse reference: %v", err)
+	}
+	dImg, err := daemon.Image(ref)
+	if err != nil {
+		return false, fmt.Errorf("failed to get image from daemon: %v", err)
+	}
+	cfg, err := dImg.ConfigFile()
+	if err != nil {
+		return false, fmt.Errorf("failed to get config for %s: %v", img, err)
+	}
+	return cfg.Architecture == runtime.GOARCH, nil
 }
 
 // ImageToCache downloads img (if not present in cache) and writes it to the local cache directory
@@ -194,6 +226,37 @@ func ImageToCache(img string) error {
 	}
 }
 
+// GHImageTarballToCache try to download the tarball of kicbase from github release.
+// This is the last resort, in case of all docker registry is not available.
+func GHImageTarballToCache(img, imgVersion string) (string, error) {
+	f := imagePathInCache(img)
+	fileLock := f + ".lock"
+
+	kicbaseArch := runtime.GOARCH
+	if kicbaseArch == "arm" {
+		kicbaseArch = "armv7"
+	}
+
+	releaser, err := lockDownload(fileLock)
+	if err != nil {
+		return "", err
+	}
+	if releaser != nil {
+		defer releaser.Release()
+	}
+	downloadURL := fmt.Sprintf("https://github.com/kubernetes/minikube/releases/download/%s/%s-%s-%s.tar",
+		version.GetVersion(),
+		img, imgVersion, kicbaseArch)
+
+	// we don't want the tarball to be decompressed
+	// so we pass client options to suppress this behavior
+	if err := download(downloadURL, f, getter.WithDecompressors(map[string]getter.Decompressor{})); err != nil {
+		return "", err
+	}
+	return downloadURL, nil
+
+}
+
 func parseImage(img string) (*name.Tag, name.Reference, error) {
 
 	var ref name.Reference
@@ -245,7 +308,8 @@ func CacheToDaemon(img string) (string, error) {
 		return "", err
 	}
 
-	cmd := exec.Command("docker", "pull", "--quiet", img)
+	platform := fmt.Sprintf("linux/%s", runtime.GOARCH)
+	cmd := exec.Command("docker", "pull", "--platform", platform, "--quiet", img)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		klog.Warningf("failed to pull image digest (expected if offline): %s: %v", output, err)
 		img = image.Tag(img)

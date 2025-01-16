@@ -104,6 +104,8 @@ func preStartMessages(name, value string) {
 		out.Styled(style.Warning, "The ambassador addon has stopped working as of v1.23.0, for more details visit: https://github.com/datawire/ambassador-operator/issues/73")
 	case "olm":
 		out.Styled(style.Warning, "The OLM addon has stopped working, for more details visit: https://github.com/operator-framework/operator-lifecycle-manager/issues/2534")
+	case "nvidia-gpu-device-plugin":
+		out.Styled(style.Warning, "The nvidia-gpu-device-plugin addon is deprecated and it's functionality is merged inside of nvidia-device-plugin addon. It will be removed in a future release. Please use the nvidia-device-plugin addon instead. For more details, visit: https://github.com/kubernetes/minikube/issues/19114.")
 	}
 }
 
@@ -120,14 +122,13 @@ func postStartMessages(cc *config.ClusterConfig, name, value string) {
 	case "dashboard":
 		out.Styled(style.Tip, `Some dashboard features require the metrics-server addon. To enable all features please run:
 
-	minikube{{.profileArg}} addons enable metrics-server	
-
+	minikube{{.profileArg}} addons enable metrics-server
 `, out.V{"profileArg": tipProfileArg})
 	case "headlamp":
 		out.Styled(style.Tip, `To access Headlamp, use the following command:
-minikube service headlamp -n headlamp
 
-`)
+	minikube{{.profileArg}} service headlamp -n headlamp
+`, out.V{"profileArg": tipProfileArg})
 		tokenGenerationTip := "To authenticate in Headlamp, fetch the Authentication Token using the following command:"
 		createSvcAccountToken := "kubectl create token headlamp --duration 24h -n headlamp"
 		getSvcAccountToken := `export SECRET=$(kubectl get secrets --namespace headlamp -o custom-columns=":metadata.name" | grep "headlamp-token")
@@ -139,16 +140,20 @@ kubectl get secret $SECRET --namespace headlamp --template=\{\{.data.token\}\} |
 			tokenGenerationTip = fmt.Sprintf("%s\nIf Kubernetes Version is <1.24:\n%s\n\nIf Kubernetes Version is >=1.24:\n%s\n", tokenGenerationTip, createSvcAccountToken, getSvcAccountToken)
 		} else {
 			if parsedClusterVersion.GTE(semver.Version{Major: 1, Minor: 24}) {
-				tokenGenerationTip = fmt.Sprintf("%s\n%s", tokenGenerationTip, createSvcAccountToken)
+				tokenGenerationTip = fmt.Sprintf("%s\n\n        %s", tokenGenerationTip, createSvcAccountToken)
 			} else {
-				tokenGenerationTip = fmt.Sprintf("%s\n%s", tokenGenerationTip, getSvcAccountToken)
+				tokenGenerationTip = fmt.Sprintf("%s\n\n        %s", tokenGenerationTip, getSvcAccountToken)
 			}
 		}
 		out.Styled(style.Tip, fmt.Sprintf("%s\n", tokenGenerationTip))
 		out.Styled(style.Tip, `Headlamp can display more detailed information when metrics-server is installed. To install it, run:
 
-minikube{{.profileArg}} addons enable metrics-server	
+	minikube{{.profileArg}} addons enable metrics-server
+`, out.V{"profileArg": tipProfileArg})
+	case "yakd":
+		out.Styled(style.Tip, `To access YAKD - Kubernetes Dashboard, wait for Pod to be ready and run the following command:
 
+	minikube{{.profileArg}} service yakd-dashboard -n yakd-dashboard
 `, out.V{"profileArg": tipProfileArg})
 	}
 }
@@ -160,6 +165,8 @@ func Deprecations(name string) (bool, string, string) {
 		return true, "metrics-server", "using metrics-server addon, heapster is deprecated"
 	case "efk":
 		return true, "", "The current images used in the efk addon contain Log4j vulnerabilities, the addon will be disabled until images are updated, see: https://github.com/kubernetes/minikube/issues/15280"
+	case "nvidia-gpu-device-plugin":
+		return true, "nvidia-device-plugin", "The nvidia-gpu-device-plugin addon is deprecated and it's functionality is merged inside of nvidia-device-plugin addon. It will be removed in a future release. Please use the nvidia-device-plugin addon instead. For more details, visit: https://github.com/kubernetes/minikube/issues/19114."
 	}
 	return false, "", ""
 }
@@ -249,9 +256,9 @@ func EnableOrDisableAddon(cc *config.ClusterConfig, name string, val string) err
 	}
 	defer api.Close()
 
-	cp, err := config.PrimaryControlPlane(cc)
+	cp, err := config.ControlPlane(*cc)
 	if err != nil {
-		exit.Error(reason.GuestCpConfig, "Error getting primary control plane", err)
+		exit.Error(reason.GuestCpConfig, "Error getting control-plane node", err)
 	}
 
 	// maintain backwards compatibility for ingress and ingress-dns addons with k8s < v1.19
@@ -351,6 +358,11 @@ func addonSpecificChecks(cc *config.ClusterConfig, name string, enable bool, run
 		if err != nil || rr.Stdout.String() == "" {
 			return true, nil
 		}
+	}
+
+	// we cannot use volcano for crio
+	if name == "volcano" && cc.KubernetesConfig.ContainerRuntime == constants.CRIO && enable {
+		return false, fmt.Errorf("volcano addon does not support crio")
 	}
 
 	return false, nil
@@ -499,7 +511,7 @@ func Enable(wg *sync.WaitGroup, cc *config.ClusterConfig, toEnable map[string]bo
 	klog.Infof("enable addons start: toEnable=%v", toEnable)
 	var enabledAddons []string
 	defer func() {
-		klog.Infof("enable addons completed in %s: enabled=%v", time.Since(start), enabledAddons)
+		klog.Infof("duration metric: took %s for enable addons: enabled=%v", time.Since(start), enabledAddons)
 	}()
 
 	toEnableList := []string{}
@@ -571,7 +583,7 @@ func ToEnable(cc *config.ClusterConfig, existing map[string]bool, additional []s
 	return enable
 }
 
-// UpdateConfig tries to update config with all enabled addons (not thread-safe).
+// UpdateConfigToEnable tries to update config with all enabled addons (not thread-safe).
 // Any error will be logged and it will continue.
 func UpdateConfigToEnable(cc *config.ClusterConfig, enabled []string) {
 	for _, a := range enabled {
@@ -604,9 +616,9 @@ func VerifyNotPaused(profile string, enable bool) error {
 	}
 	defer api.Close()
 
-	cp, err := config.PrimaryControlPlane(cc)
+	cp, err := config.ControlPlane(*cc)
 	if err != nil {
-		return errors.Wrap(err, "control plane")
+		return errors.Wrap(err, "get control-plane node")
 	}
 
 	host, err := machine.LoadHost(api, config.MachineName(*cc, cp))

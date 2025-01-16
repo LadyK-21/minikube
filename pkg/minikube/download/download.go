@@ -65,7 +65,7 @@ func CreateDstDownloadMock(_, dst string) error {
 }
 
 // download is a well-configured atomic download function
-func download(src, dst string) error {
+func download(src, dst string, options ...getter.ClientOption) error {
 	var clientOptions []getter.ClientOption
 	if out.IsTerminal(os.Stdout) && !detect.GithubActionRunner() {
 		progress := getter.WithProgress(DefaultProgressBar)
@@ -76,6 +76,7 @@ func download(src, dst string) error {
 	} else {
 		clientOptions = []getter.ClientOption{}
 	}
+	clientOptions = append(clientOptions, options...)
 	tmpDst := dst + ".download"
 	client := &getter.Client{
 		Src:     src,
@@ -111,7 +112,7 @@ func download(src, dst string) error {
 	return os.Rename(tmpDst, dst)
 }
 
-// withinUnitTset detects if we are in running within a unit-test
+// withinUnitTest detects if we are in running within a unit-test
 func withinUnitTest() bool {
 	// Nope, it's the integration test
 	if flag.Lookup("minikube-start-args") != nil || strings.HasPrefix(filepath.Base(os.Args[0]), "e2e-") {

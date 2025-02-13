@@ -217,6 +217,12 @@ var (
 		Style: style.UnmetRequirement,
 		URL:   "https://docs.docker.com/docker-for-mac/#resources",
 	}
+	// invalid memory value for Hyper-V
+	RsrcInvalidHyperVMemory = Kind{
+		ID:       "RSRC_INVALID_HYPERV_MEMORY",
+		ExitCode: ExResourceError,
+		Style:    style.UnmetRequirement,
+	}
 
 	// insufficient disk storage available to the docker driver
 	RsrcInsufficientDockerStorage = Kind{
@@ -282,6 +288,8 @@ var (
 	HostPurge = Kind{ID: "HOST_PURGE", ExitCode: ExHostError}
 	// minikube failed to persist profile config
 	HostSaveProfile = Kind{ID: "HOST_SAVE_PROFILE", ExitCode: ExHostConfig}
+	// Host doesn't support 9p
+	HostUnsupported = Kind{ID: "HOST_UNSUPPORTED", ExitCode: ExHostUnsupported}
 
 	// minikube could not find a provider for the selected driver
 	ProviderNotFound = Kind{ID: "PROVIDER_NOT_FOUND", ExitCode: ExProviderNotFound}

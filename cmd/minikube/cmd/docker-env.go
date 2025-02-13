@@ -25,7 +25,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -228,8 +227,7 @@ func mustRestartDockerd(name string, runner command.Runner) {
 		// will need to wait for apisever container to come up, this usually takes 5 seconds
 		// verifying apisever using kverify would add code complexity for a rare case.
 		klog.Warningf("waiting to ensure apisever container is up...")
-		startTime := time.Now()
-		if err = waitForAPIServerProcess(runner, startTime, time.Second*30); err != nil {
+		if err = waitForAPIServerProcess(runner, time.Now(), time.Second*30); err != nil {
 			klog.Warningf("apiserver container isn't up, error: %v", err)
 		}
 	}
@@ -270,7 +268,7 @@ For example, you can do all docker operations such as docker build, docker run, 
 
 Note: You need the docker-cli to be installed on your machine.
 docker-cli install instructions: https://minikube.sigs.k8s.io/docs/tutorials/docker_desktop_replacement/#steps`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		var err error
 
 		shl := shell.ForceShell
@@ -310,7 +308,6 @@ docker-cli install instructions: https://minikube.sigs.k8s.io/docs/tutorials/doc
 			exit.Message(reason.EnvMultiConflict, `The docker-env command is incompatible with multi-node clusters. Use the 'registry' add-on: https://minikube.sigs.k8s.io/docs/handbook/registry/`)
 		}
 		cr := co.Config.KubernetesConfig.ContainerRuntime
-		// nerdctld supports amd64 and arm64
 		if err := dockerEnvSupported(cr, driverName); err != nil {
 			exit.Message(reason.Usage, err.Error())
 		}
@@ -675,9 +672,6 @@ func tryDockerConnectivity(bin string, ec DockerEnvConfig) ([]byte, error) {
 }
 
 func dockerEnvSupported(containerRuntime, driverName string) error {
-	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
-		return fmt.Errorf("the docker-env command only supports amd64 & arm64 architectures")
-	}
 	if containerRuntime != constants.Docker && containerRuntime != constants.Containerd {
 		return fmt.Errorf("the docker-env command only supports the docker and containerd runtimes")
 	}

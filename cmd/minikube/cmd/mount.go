@@ -91,7 +91,7 @@ var mountCmd = &cobra.Command{
 	Use:   "mount [flags] <source directory>:<target directory>",
 	Short: "Mounts the specified directory into minikube",
 	Long:  `Mounts the specified directory into minikube.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if isKill {
 			if err := killMountProcess(); err != nil {
 				exit.Error(reason.HostKillMountProc, "Error killing mount process", err)
@@ -184,6 +184,11 @@ var mountCmd = &cobra.Command{
 			}
 			parts := strings.Split(o, "=")
 			cfg.Options[parts[0]] = parts[1]
+		}
+
+		if runtime.GOOS == "linux" && !detect.IsNinePSupported() {
+			exit.Message(reason.HostUnsupported, "The host does not support filesystem 9p.")
+
 		}
 
 		// An escape valve to allow future hackers to try NFS, VirtFS, or other FS types.

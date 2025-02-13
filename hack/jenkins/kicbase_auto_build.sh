@@ -35,12 +35,20 @@ source ./hack/jenkins/installers/check_install_linux_crons.sh
 export GOBIN=/usr/local/go/bin
 export PATH=$PATH:$GOBIN
 
+generate_package_list() {
+	make
+	./out/minikube delete
+	./out/minikube start
+	./out/minikube ssh -- sudo dpkg -l --no-pager > hack/kicbase_version/os-package-list.txt
+	./out/minikube delete
+}
+
 # Let's make sure we have the newest kicbase reference
 curl -L https://github.com/kubernetes/minikube/raw/master/pkg/drivers/kic/types.go --output types-head.go
 # kicbase tags are of the form VERSION-TIMESTAMP-PR, so this grep finds that TIMESTAMP in the middle
 # if it doesn't exist, it will just return VERSION, which is covered in the if statement below
-HEAD_KIC_TIMESTAMP=$(egrep "Version =" types-head.go | cut -d \" -f 2 | cut -d "-" -f 2)
-CURRENT_KIC_TS=$(egrep "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2 | cut -d "-" -f 2)
+HEAD_KIC_TIMESTAMP=$(grep -E "Version =" types-head.go | cut -d \" -f 2 | cut -d "-" -f 2)
+CURRENT_KIC_TS=$(grep -E "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2 | cut -d "-" -f 2)
 if [[ $HEAD_KIC_TIMESTAMP != v* ]]; then
 	diff=$((CURRENT_KIC_TS-HEAD_KIC_TIMESTAMP))
 	if [[ $CURRENT_KIC_TS == v* ]] || [ $diff -lt 0 ]; then
@@ -55,7 +63,7 @@ if [[ -z $KIC_VERSION ]]; then
 	# Testing PRs here
 	release=false
 	now=$(date +%s)
-	KV=$(egrep "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2 | cut -d "-" -f 1)
+	KV=$(grep -E "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2 | cut -d "-" -f 1)
 	GCR_REPO=gcr.io/k8s-minikube/kicbase-builds
 	DH_REPO=docker.io/kicbase/build
 	export KIC_VERSION=$KV-$now-$ghprbPullId
@@ -100,6 +108,7 @@ if [ "$release" = false ]; then
 	git checkout -b ${ghprbPullAuthorLogin}-${ghprbSourceBranch} ${ghprbPullAuthorLogin}/${ghprbSourceBranch}
 
 	sed -i "s|Version = .*|Version = \"${KIC_VERSION}\"|;s|baseImageSHA = .*|baseImageSHA = \"${sha}\"|;s|gcrRepo = .*|gcrRepo = \"${GCR_REPO}\"|;s|dockerhubRepo = .*|dockerhubRepo = \"${DH_REPO}\"|" pkg/drivers/kic/types.go; make generate-docs;
+	generate_package_list
 
 	git commit -am "Updating kicbase image to ${KIC_VERSION}"
 	git push ${ghprbPullAuthorLogin} HEAD:${ghprbSourceBranch}
@@ -122,11 +131,12 @@ else
 
 	sed -i "s|Version = .*|Version = \"${KIC_VERSION}\"|;s|baseImageSHA = .*|baseImageSHA = \"${sha}\"|;s|gcrRepo = .*|gcrRepo = \"${GCR_REPO}\"|;s|dockerhubRepo = .*|dockerhubRepo = \"${DH_REPO}\"|" pkg/drivers/kic/types.go
 	make generate-docs
+	generate_package_list
 
 	git add pkg/drivers/kic/types.go site/content/en/docs/commands/start.md
-	git commit -m "Update kicbase to ${KIC_VERSION}"
+	git commit -m "Release: Update kicbase to ${KIC_VERSION}"
 	git remote add minikube-bot git@github.com:minikube-bot/minikube.git
 	git push -f minikube-bot ${branch}
 
-	gh pr create --fill --base master --head minikube-bot:${branch}
+	gh pr create --fill --base master --head minikube-bot:${branch} -l "ok-to-test"
 fi

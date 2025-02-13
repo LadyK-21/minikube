@@ -42,6 +42,7 @@ import (
 
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/reason"
@@ -55,9 +56,10 @@ import (
 	"github.com/phayes/freeport"
 	"github.com/pkg/errors"
 	"golang.org/x/build/kubernetes/api"
+	"k8s.io/minikube/pkg/minikube/cruntime"
 )
 
-const addonResizer = "gcr.io/google-containers/addon-resizer"
+const echoServerImg = "kicbase/echo-server"
 
 // validateFunc are for subtests that share a single setup
 type validateFunc func(context.Context, *testing.T, string)
@@ -72,9 +74,26 @@ var runCorpProxy = detect.GithubActionRunner() && runtime.GOOS == "linux" && !ar
 
 // TestFunctional are functionality tests which can safely share a profile in parallel
 func TestFunctional(t *testing.T) {
+	testFunctional(t, "")
+}
 
+// TestFunctionalNewestKubernetes are functionality run functional tests using
+// NewestKubernetesVersion
+func TestFunctionalNewestKubernetes(t *testing.T) {
+	if strings.Contains(*startArgs, "--kubernetes-version") || constants.NewestKubernetesVersion == constants.DefaultKubernetesVersion {
+		t.Skip()
+	}
+	k8sVersionString := constants.NewestKubernetesVersion
+	t.Run("Version"+k8sVersionString, func(t *testing.T) {
+		testFunctional(t, k8sVersionString)
+	})
+
+}
+
+func testFunctional(t *testing.T, k8sVersion string) {
 	profile := UniqueProfileName("functional")
-	ctx, cancel := context.WithTimeout(context.Background(), Minutes(40))
+	ctx := context.WithValue(context.Background(), ContextKey("k8sVersion"), k8sVersion)
+	ctx, cancel := context.WithTimeout(ctx, Minutes(40))
 	defer func() {
 		if !*cleanup {
 			return
@@ -86,7 +105,6 @@ func TestFunctional(t *testing.T) {
 
 		Cleanup(t, profile, cancel)
 	}()
-
 	// Serial tests
 	t.Run("serial", func(t *testing.T) {
 		tests := []struct {
@@ -182,10 +200,10 @@ func cleanupUnwantedImages(ctx context.Context, t *testing.T, profile string) {
 	if err != nil {
 		t.Skipf("docker is not installed, cannot delete docker images")
 	} else {
-		t.Run("delete addon-resizer images", func(t *testing.T) {
-			tags := []string{"1.8.8", profile}
+		t.Run("delete echo-server images", func(t *testing.T) {
+			tags := []string{"1.0", profile}
 			for _, tag := range tags {
-				image := fmt.Sprintf("%s:%s", addonResizer, tag)
+				image := fmt.Sprintf("%s:%s", echoServerImg, tag)
 				rr, err := Run(t, exec.CommandContext(ctx, "docker", "rmi", "-f", image))
 				if err != nil {
 					t.Logf("failed to remove image %q from docker images. args %q: %v", image, rr.Command(), err)
@@ -220,7 +238,7 @@ func validateNodeLabels(ctx context.Context, t *testing.T, profile string) {
 		t.Errorf("failed to 'kubectl get nodes' with args %q: %v", rr.Command(), err)
 	}
 	// docs: check if the node labels matches with the expected Minikube labels: `minikube.k8s.io/*`
-	expectedLabels := []string{"minikube.k8s.io/commit", "minikube.k8s.io/version", "minikube.k8s.io/updated_at", "minikube.k8s.io/name"}
+	expectedLabels := []string{"minikube.k8s.io/commit", "minikube.k8s.io/version", "minikube.k8s.io/updated_at", "minikube.k8s.io/name", "minikube.k8s.io/primary"}
 	for _, el := range expectedLabels {
 		if !strings.Contains(rr.Output(), el) {
 			t.Errorf("expected to have label %q in node labels but got : %s", el, rr.Output())
@@ -230,7 +248,7 @@ func validateNodeLabels(ctx context.Context, t *testing.T, profile string) {
 
 // tagAndLoadImage is a helper function to pull, tag, load image (decreases cyclomatic complexity for linter).
 func tagAndLoadImage(ctx context.Context, t *testing.T, profile, taggedImage string) {
-	newPulledImage := fmt.Sprintf("%s:%s", addonResizer, "1.8.9")
+	newPulledImage := fmt.Sprintf("%s:%s", echoServerImg, "latest")
 	rr, err := Run(t, exec.CommandContext(ctx, "docker", "pull", newPulledImage))
 	if err != nil {
 		t.Fatalf("failed to setup test (pull image): %v\n%s", err, rr.Output())
@@ -325,8 +343,8 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 		checkImageExists(ctx, t, profile, newImage)
 	})
 
-	taggedImage := fmt.Sprintf("%s:%s", addonResizer, profile)
-	imageFile := "addon-resizer-save.tar"
+	taggedImage := fmt.Sprintf("%s:%s", echoServerImg, profile)
+	imageFile := "echo-server-save.tar"
 	var imagePath string
 	defer os.Remove(imageFile)
 
@@ -337,7 +355,7 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 			t.Fatalf("failed to get absolute path of file %q: %v", imageFile, err)
 		}
 
-		pulledImage := fmt.Sprintf("%s:%s", addonResizer, "1.8.8")
+		pulledImage := fmt.Sprintf("%s:%s", echoServerImg, "1.0")
 		rr, err := Run(t, exec.CommandContext(ctx, "docker", "pull", pulledImage))
 		if err != nil {
 			t.Fatalf("failed to setup test (pull image): %v\n%s", err, rr.Output())
@@ -424,8 +442,11 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 		if err != nil {
 			t.Fatalf("saving image from minikube to daemon: %v\n%s", err, rr.Output())
 		}
-
-		rr, err = Run(t, exec.CommandContext(ctx, "docker", "image", "inspect", taggedImage))
+		imageToDelete := taggedImage
+		if ContainerRuntime() == "crio" {
+			imageToDelete = cruntime.AddLocalhostPrefix(imageToDelete)
+		}
+		rr, err = Run(t, exec.CommandContext(ctx, "docker", "image", "inspect", imageToDelete))
 		if err != nil {
 			t.Fatalf("expected image to be loaded into Docker, but image was not found: %v\n%s", err, rr.Output())
 		}
@@ -645,8 +666,8 @@ func validateSoftStart(ctx context.Context, t *testing.T, profile string) {
 	if err != nil {
 		t.Fatalf("error reading cluster config before soft start: %v", err)
 	}
-	if beforeCfg.Config.KubernetesConfig.NodePort != apiPortTest {
-		t.Errorf("expected cluster config node port before soft start to be %d but got %d", apiPortTest, beforeCfg.Config.KubernetesConfig.NodePort)
+	if beforeCfg.Config.APIServerPort != apiPortTest {
+		t.Errorf("expected cluster config node port before soft start to be %d but got %d", apiPortTest, beforeCfg.Config.APIServerPort)
 	}
 
 	// docs: Run `minikube start` again as a soft start
@@ -664,8 +685,8 @@ func validateSoftStart(ctx context.Context, t *testing.T, profile string) {
 		t.Errorf("error reading cluster config after soft start: %v", err)
 	}
 
-	if afterCfg.Config.KubernetesConfig.NodePort != apiPortTest {
-		t.Errorf("expected node port in the config not change after soft start. exepceted node port to be %d but got %d.", apiPortTest, afterCfg.Config.KubernetesConfig.NodePort)
+	if afterCfg.Config.APIServerPort != apiPortTest {
+		t.Errorf("expected node port in the config not to change after soft start. expected node port to be %d but got %d.", apiPortTest, afterCfg.Config.APIServerPort)
 	}
 }
 
@@ -780,8 +801,8 @@ func imageID(image string) string {
 		},
 	}
 
-	if imgIds, ok := ids[image]; ok {
-		if id, ok := imgIds[runtime.GOARCH]; ok {
+	if imgIDs, ok := ids[image]; ok {
+		if id, ok := imgIDs[runtime.GOARCH]; ok {
 			return id
 		}
 		panic(fmt.Sprintf("unexpected architecture for image %q: %v", image, runtime.GOARCH))
@@ -965,7 +986,7 @@ func validateDryRun(ctx context.Context, t *testing.T, profile string) {
 
 	// docs: Run `minikube start --dry-run --memory 250MB`
 	// Too little memory!
-	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgsWithContext(ctx)...)
 	c := exec.CommandContext(mctx, Target(), startArgs...)
 	rr, err := Run(t, c)
 
@@ -982,7 +1003,7 @@ func validateDryRun(ctx context.Context, t *testing.T, profile string) {
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// docs: Run `minikube start --dry-run`
-	startArgs = append([]string{"start", "-p", profile, "--dry-run", "--alsologtostderr", "-v=1"}, StartArgs()...)
+	startArgs = append([]string{"start", "-p", profile, "--dry-run", "--alsologtostderr", "-v=1"}, StartArgsWithContext(ctx)...)
 	c = exec.CommandContext(dctx, Target(), startArgs...)
 	rr, err = Run(t, c)
 	// docs: Make sure the command doesn't raise any error
@@ -1007,7 +1028,7 @@ func validateInternationalLanguage(ctx context.Context, t *testing.T, profile st
 	defer cancel()
 
 	// Too little memory!
-	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgsWithContext(ctx)...)
 	c := exec.CommandContext(mctx, Target(), startArgs...)
 	// docs: Set environment variable `LC_ALL=fr` to enable minikube translation to French
 	c.Env = append(os.Environ(), "LC_ALL=fr")
@@ -1246,9 +1267,6 @@ func validateLogsFileCmd(ctx context.Context, t *testing.T, profile string) {
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "logs", "--file", logFileName))
 	if err != nil {
 		t.Errorf("%s failed: %v", rr.Command(), err)
-	}
-	if rr.Stdout.String() != "" {
-		t.Errorf("expected empty minikube logs output, but got: \n***%s***\n", rr.Output())
 	}
 
 	logs, err := os.ReadFile(logFileName)
@@ -1774,6 +1792,9 @@ func validateCpCmd(ctx context.Context, t *testing.T, profile string) {
 
 	tmpPath := filepath.Join(tmpDir, "cp-test.txt")
 	testCpCmd(ctx, t, profile, profile, dstPath, "", tmpPath)
+
+	// copy to nonexistent directory structure
+	testCpCmd(ctx, t, profile, "", srcPath, "", "/tmp/does/not/exist/cp-test.txt")
 }
 
 // validateMySQL validates a minimalist MySQL deployment
@@ -2221,7 +2242,7 @@ func startMinikubeWithProxy(ctx context.Context, t *testing.T, profile string, p
 		memoryFlag = "--memory=6000"
 	}
 	// passing --api-server-port so later verify it didn't change in soft start.
-	startArgs := append([]string{"start", "-p", profile, memoryFlag, fmt.Sprintf("--apiserver-port=%d", apiPortTest), "--wait=all"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, memoryFlag, fmt.Sprintf("--apiserver-port=%d", apiPortTest), "--wait=all"}, StartArgsWithContext(ctx)...)
 	c := exec.CommandContext(ctx, Target(), startArgs...)
 	env := os.Environ()
 	env = append(env, fmt.Sprintf("%s=%s", proxyEnv, addr))

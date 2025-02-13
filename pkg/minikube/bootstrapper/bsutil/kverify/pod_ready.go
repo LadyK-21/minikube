@@ -19,6 +19,7 @@ package kverify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -78,7 +79,7 @@ func waitPodCondition(cs *kubernetes.Clientset, name, namespace string, conditio
 	klog.Infof("waiting up to %v for pod %q in %q namespace to be %q ...", timeout, name, namespace, condition)
 	start := time.Now()
 	defer func() {
-		klog.Infof("duration metric: took %v waiting for pod %q in %q namespace to be %q ...", time.Since(start), name, namespace, condition)
+		klog.Infof("duration metric: took %s for pod %q in %q namespace to be %q ...", time.Since(start), name, namespace, condition)
 	}()
 
 	lap := time.Now()
@@ -95,7 +96,7 @@ func waitPodCondition(cs *kubernetes.Clientset, name, namespace string, conditio
 		// return immediately: status == core.ConditionUnknown
 		if status == core.ConditionUnknown {
 			klog.Info(reason)
-			return false, fmt.Errorf(reason)
+			return false, errors.New(reason)
 		}
 		// reduce log spam
 		if time.Since(lap) > (2 * time.Second) {
